@@ -626,6 +626,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
+        "https://next-lang-graph-ve46-ten.vercel.app/",
     ],
     allow_credentials=False,
     allow_methods=["*"],
