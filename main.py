@@ -8,6 +8,7 @@ from openai import OpenAI
 from langgraph.graph import StateGraph, START, END
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 
@@ -619,6 +620,14 @@ app_graph = builder.compile()
 
 app = FastAPI(
     title="Dual-AI Review API"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
