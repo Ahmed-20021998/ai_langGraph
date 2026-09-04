@@ -18,31 +18,29 @@ from pydantic import BaseModel
 load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 
 if not OPENROUTER_API_KEY:
     raise ValueError("OPENROUTER_API_KEY is missing")
 
-# ------------------------------------------------------------
-# IMPORTANT — Ollama on Vercel
-# ------------------------------------------------------------
-# Vercel serverless functions have no persistent daemon, so a local
-# Ollama install will NOT work there. You must run Ollama on a
-# separate always-on host (your own machine, a VPS, Fly.io,
-# Railway, etc.) and point this app at it with OLLAMA_HOST, e.g.:
-#
-#   OLLAMA_HOST=https://your-ollama-server.example.com
-#
-# If OLLAMA_HOST is not set, the ollama-python client defaults to
-# http://127.0.0.1:11434, which will simply fail on Vercel.
-# ------------------------------------------------------------
-
-OLLAMA_HOST = os.getenv("OLLAMA_HOST")  # e.g. https://your-ollama-host:11434
-
-ollama_client = ollama.Client(host=OLLAMA_HOST) if OLLAMA_HOST else ollama
+if not OLLAMA_API_KEY:
+    raise ValueError("OLLAMA_API_KEY is missing")
 
 
 # ============================================================
-# CLIENTS
+# OLLAMA CLOUD CLIENT
+# ============================================================
+
+ollama_client = ollama.Client(
+    host="https://ollama.com",
+    headers={
+        "Authorization": f"Bearer {OLLAMA_API_KEY}"
+    }
+)
+
+
+# ============================================================
+# OPENROUTER CLIENT
 # ============================================================
 
 openrouter = OpenAI(
@@ -73,10 +71,12 @@ class State(TypedDict):
 
 
 # ============================================================
-# NODE 1 — OLLAMA GENERATES FIRST RESPONSE
+# NODE 1 — OLLAMA CLOUD GENERATES FIRST RESPONSE
 # ============================================================
 
 def ollama_generate(state: State):
+
+    print("\n[Ollama Cloud] Generating response...")
 
     user_message = state["user_message"]
 
@@ -84,6 +84,7 @@ def ollama_generate(state: State):
 You are the first AI assistant.
 
 Answer the user's question accurately and clearly.
+
 If the question involves any calculation, numeric comparison,
 or unit conversion, show your work step by step BEFORE giving
 the final answer, then state the final answer clearly on its
@@ -94,19 +95,26 @@ User question:
 """
 
     response = ollama_client.chat(
-        model="gemma4:31b-cloud",
+        model="gemma4:31b",
         messages=[
-            {"role": "user", "content": prompt},
+            {
+                "role": "user",
+                "content": prompt
+            }
         ]
     )
 
+    content = response["message"]["content"]
+
+    print("[Ollama Cloud] Response received.")
+
     return {
-        "ollama_response": response["message"]["content"]
+        "ollama_response": content
     }
 
 
 # ============================================================
-# NODE 2 — OPENROUTER REVIEWS OLLAMA (no AGREE option)
+# NODE 2 — OPENROUTER REVIEWS OLLAMA
 # ============================================================
 
 def claude_review(state: State):
@@ -117,63 +125,78 @@ def claude_review(state: State):
     ollama_response = state["ollama_response"]
 
     prompt = f"""
-You are a strict, careful reviewer. You will be graded on ACCURACY,
-not on being agreeable or on being different for the sake of it.
+You are a strict, careful reviewer.
+
+You will be graded on ACCURACY, not on being agreeable or
+on being different for the sake of it.
 
 The user asked:
+
 {user_message}
 
 Ollama answered:
+
 {ollama_response}
 
---------------------------------------------------------------------
-STEP 1 — INDEPENDENT VERIFICATION (do this first, silently reasoning
-on paper, inside a block called SCRATCHPAD):
-- Solve the user's question yourself, from scratch, as if Ollama had
-  not answered yet.
-- If it involves numbers, comparisons, or units, work through it
-  digit by digit / unit by unit. Do not skip steps.
-- Then compare your own independently derived answer to Ollama's
-  final answer.
+----------------------------------------------------------------
+STEP 1 — INDEPENDENT VERIFICATION
 
-STEP 2 — VERDICT:
-You do NOT have an "AGREE" option. You must always choose one of:
+Solve the user's question yourself from scratch.
+
+If it involves numbers, comparisons, or units, work through
+them carefully.
+
+Then compare your independently derived answer to Ollama's
+answer.
+
+----------------------------------------------------------------
+STEP 2 — VERDICT
+
+You MUST choose exactly one:
 
 DISAGREE
 ADDITIONS
 
-Choose DISAGREE if your independent verification contradicts
-Ollama's final answer/conclusion, or if Ollama's reasoning has an
-important logical or factual error, even if unstated. After the
-label, give your corrected final answer, clearly stated.
+Choose DISAGREE if:
 
-Choose ADDITIONS in every other case (i.e. whenever you do NOT have
-a correction). If, after careful verification, you genuinely have
-nothing important to add and Ollama's answer is correct and
-complete, still choose ADDITIONS, but write ONLY the single word
-NONE as the content (nothing else). Only write real additional
-content under ADDITIONS if there truly is something useful and
-important missing.
+- Ollama's final answer is incorrect
+- Ollama's conclusion is incorrect
+- Ollama contains an important factual error
+- Ollama contains an important logical error
 
-The verdict you choose MUST match the conclusion of your own
-scratchpad.
+After DISAGREE, provide the corrected answer.
 
---------------------------------------------------------------------
-OUTPUT FORMAT (follow exactly):
+Choose ADDITIONS otherwise.
+
+If Ollama is correct and complete:
+
+ADDITIONS:
+NONE
+
+If something important is missing:
+
+ADDITIONS:
+<additional information>
+
+----------------------------------------------------------------
+OUTPUT FORMAT
 
 SCRATCHPAD:
-<your independent step-by-step verification here>
+<your verification>
 
 VERDICT: <DISAGREE or ADDITIONS>
-<if DISAGREE: your corrected final answer, stated plainly>
-<if ADDITIONS and you have something useful to add: only that
- content>
-<if ADDITIONS and you have nothing to add: the single word NONE>
+
+<content>
 """
 
     response = openrouter.chat.completions.create(
         model="openai/gpt-5-mini",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
         max_tokens=2000
     )
 
@@ -183,44 +206,78 @@ VERDICT: <DISAGREE or ADDITIONS>
     verdict_block = result
 
     if "VERDICT:" in result:
+
         parts = result.split("VERDICT:", 1)
-        scratchpad = parts[0].replace("SCRATCHPAD:", "").strip()
+
+        scratchpad = (
+            parts[0]
+            .replace("SCRATCHPAD:", "")
+            .strip()
+        )
+
         verdict_block = parts[1].strip()
 
     lines = verdict_block.split("\n", 1)
+
     decision_line = lines[0].strip().upper()
 
     if "DISAGREE" in decision_line:
         decision = "DISAGREE"
+
     elif "ADDITIONS" in decision_line:
         decision = "ADDITIONS"
+
     else:
         decision = "DISAGREE"
 
-    details = lines[1].strip() if len(lines) > 1 else ""
+    details = (
+        lines[1].strip()
+        if len(lines) > 1
+        else ""
+    )
 
     is_none_addition = (
         decision == "ADDITIONS"
-        and (details == "" or details.strip().upper().rstrip(".") == "NONE")
+        and (
+            details == ""
+            or details.strip().upper().rstrip(".") == "NONE"
+        )
     )
 
-    # ----------------------------------------------------------------
-    # PRINT THE RAW MODEL DECISION (before "none-addition" is folded
-    # into "agree" by the edge function below)
-    # ----------------------------------------------------------------
     if decision == "DISAGREE":
+
         print("[OpenRouter Decision] DISAGREE")
+
     elif is_none_addition:
-        print("[OpenRouter Decision] ADDITIONS -> NONE (treated as AGREE, no action taken)")
+
+        print(
+            "[OpenRouter Decision] "
+            "ADDITIONS -> NONE"
+        )
+
     else:
+
         print("[OpenRouter Decision] ADDITIONS")
 
     return {
         "claude_decision": decision,
-        "claude_response": details if decision == "DISAGREE" else "",
-        "claude_additions": "" if is_none_addition else (
-            details if decision == "ADDITIONS" else ""
+
+        "claude_response": (
+            details
+            if decision == "DISAGREE"
+            else ""
         ),
+
+        "claude_additions": (
+            ""
+            if is_none_addition
+            else (
+                details
+                if decision == "ADDITIONS"
+                else ""
+            )
+        ),
+
         "claude_reasoning": scratchpad
     }
 
@@ -229,9 +286,12 @@ VERDICT: <DISAGREE or ADDITIONS>
 # EDGE — CLAUDE DECISION
 # ============================================================
 
-def claude_decision(state: State) -> Literal["agree", "disagree", "additions"]:
+def claude_decision(
+    state: State
+) -> Literal["agree", "disagree", "additions"]:
 
     decision = state["claude_decision"]
+
     additions = state["claude_additions"]
 
     if decision == "DISAGREE":
@@ -244,88 +304,144 @@ def claude_decision(state: State) -> Literal["agree", "disagree", "additions"]:
 
 
 # ============================================================
-# NODE 3 — RETURN OLLAMA (silent agreement)
+# NODE 3 — RETURN OLLAMA
 # ============================================================
 
 def return_ollama(state: State):
-    print("[System] Returning Ollama's answer as-is (agree).")
-    return {"final_response": state["ollama_response"]}
+
+    print(
+        "[System] Returning Ollama's answer."
+    )
+
+    return {
+        "final_response":
+            state["ollama_response"]
+    }
 
 
 # ============================================================
-# NODE 4 — REVIEWER DISAGREES
+# NODE 4 — PREPARE CLAUDE CORRECTION
 # ============================================================
-# NOTE: this node is intentionally named differently from the
-# "claude_response" State key. Newer versions of langgraph raise
-# ValueError if a node name matches a State field name.
 
 def prepare_claude_correction(state: State):
-    return {"claude_response": state["claude_response"]}
+
+    return {
+        "claude_response":
+            state["claude_response"]
+    }
 
 
 # ============================================================
-# NODE 5 — OLLAMA REVIEWS OPENROUTER'S CORRECTION
+# NODE 5 — OLLAMA CLOUD REVIEWS CLAUDE
 # ============================================================
 
 def ollama_review_claude(state: State):
 
-    print("[Ollama] Reviewing OpenRouter's correction...")
+    print(
+        "[Ollama Cloud] "
+        "Reviewing OpenRouter's correction..."
+    )
 
     user_message = state["user_message"]
+
     ollama_response = state["ollama_response"]
+
     claude_response_text = state["claude_response"]
 
     prompt = f"""
-You are the second reviewer. You will be graded on ACCURACY, not on
-agreeableness.
+You are the second reviewer.
+
+You will be graded on ACCURACY.
 
 The user asked:
+
 {user_message}
 
 Your original answer was:
+
 {ollama_response}
 
-Another AI reviewer disagreed and proposed this answer:
+Another AI reviewer disagreed and proposed:
+
 {claude_response_text}
 
---------------------------------------------------------------------
-STEP 1 — RE-DERIVE THE ANSWER YOURSELF, independently, from scratch.
-If the question involves numbers, comparisons, or units, work
-through it step by step.
+----------------------------------------------------------------
+STEP 1
 
-STEP 2 — Compare your fresh result to the other reviewer's answer.
+Re-derive the answer yourself independently.
 
-STEP 3 — Output your verdict. It MUST follow logically from Step 1.
+If the question involves numbers, comparisons, or units,
+work through it step by step.
 
---------------------------------------------------------------------
-OUTPUT FORMAT (follow exactly):
+----------------------------------------------------------------
+STEP 2
+
+Compare your fresh result with the other reviewer's answer.
+
+----------------------------------------------------------------
+STEP 3
+
+Output exactly one verdict:
+
+AGREE
+
+or
+
+DISAGREE
+
+----------------------------------------------------------------
+OUTPUT FORMAT
 
 SCRATCHPAD:
-<your independent step-by-step re-derivation here>
+<your independent reasoning>
 
 VERDICT: <AGREE or DISAGREE>
 """
 
     response = ollama_client.chat(
-        model="gemma4:31b-cloud",
-        messages=[{"role": "user", "content": prompt}],
+        model="gemma4:31b",
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
     )
 
     raw = response["message"]["content"].strip()
 
     scratchpad = ""
+
     verdict_text = raw
 
     if "VERDICT:" in raw:
+
         parts = raw.split("VERDICT:", 1)
-        scratchpad = parts[0].replace("SCRATCHPAD:", "").strip()
+
+        scratchpad = (
+            parts[0]
+            .replace("SCRATCHPAD:", "")
+            .strip()
+        )
+
         verdict_text = parts[1].strip().upper()
+
     else:
+
         verdict_text = raw.upper()
 
-    decision = "AGREE" if ("AGREE" in verdict_text and "DISAGREE" not in verdict_text) else "DISAGREE"
+    if (
+        "AGREE" in verdict_text
+        and "DISAGREE" not in verdict_text
+    ):
+        decision = "AGREE"
 
-    print(f"[Ollama Decision] {decision}")
+    else:
+        decision = "DISAGREE"
+
+    print(
+        f"[Ollama Decision] {decision}"
+    )
 
     return {
         "ollama_decision": decision,
@@ -337,27 +453,52 @@ VERDICT: <AGREE or DISAGREE>
 # EDGE — OLLAMA DECISION
 # ============================================================
 
-def ollama_decision(state: State) -> Literal["agree", "disagree"]:
-    return "agree" if state["ollama_decision"] == "AGREE" else "disagree"
+def ollama_decision(
+    state: State
+) -> Literal["agree", "disagree"]:
+
+    return (
+        "agree"
+        if state["ollama_decision"] == "AGREE"
+        else "disagree"
+    )
 
 
 # ============================================================
-# NODE 6 — RETURN CLAUDE (OpenRouter's correction wins)
+# NODE 6 — RETURN CLAUDE CORRECTION
 # ============================================================
 
 def return_claude(state: State):
-    print("[System] Ollama agreed with OpenRouter's correction — returning it.")
-    return {"final_response": state["claude_response"]}
+
+    print(
+        "[System] "
+        "Ollama agreed with OpenRouter correction."
+    )
+
+    return {
+        "final_response":
+            state["claude_response"]
+    }
 
 
 # ============================================================
 # NODE 7 — RETURN OLLAMA + ADDITIONS
 # ============================================================
 
-def return_ollama_with_additions(state: State):
-    print("[System] Returning Ollama response + OpenRouter additions.")
+def return_ollama_with_additions(
+    state: State
+):
+
+    print(
+        "[System] "
+        "Returning Ollama + OpenRouter additions."
+    )
+
     return {
-        "final_response": state["ollama_response"] + "\n\n" + state["claude_additions"]
+        "final_response":
+            state["ollama_response"]
+            + "\n\n"
+            + state["claude_additions"]
     }
 
 
@@ -367,92 +508,226 @@ def return_ollama_with_additions(state: State):
 
 builder = StateGraph(State)
 
-builder.add_node("ollama_generate", ollama_generate)
-builder.add_node("claude_review", claude_review)
-builder.add_node("return_ollama", return_ollama)
-builder.add_node("prepare_claude_correction", prepare_claude_correction)
-builder.add_node("ollama_review_claude", ollama_review_claude)
-builder.add_node("return_claude", return_claude)
-builder.add_node("return_ollama_with_additions", return_ollama_with_additions)
+builder.add_node(
+    "ollama_generate",
+    ollama_generate
+)
 
-builder.add_edge(START, "ollama_generate")
-builder.add_edge("ollama_generate", "claude_review")
+builder.add_node(
+    "claude_review",
+    claude_review
+)
+
+builder.add_node(
+    "return_ollama",
+    return_ollama
+)
+
+builder.add_node(
+    "prepare_claude_correction",
+    prepare_claude_correction
+)
+
+builder.add_node(
+    "ollama_review_claude",
+    ollama_review_claude
+)
+
+builder.add_node(
+    "return_claude",
+    return_claude
+)
+
+builder.add_node(
+    "return_ollama_with_additions",
+    return_ollama_with_additions
+)
+
+
+# ============================================================
+# GRAPH EDGES
+# ============================================================
+
+builder.add_edge(
+    START,
+    "ollama_generate"
+)
+
+builder.add_edge(
+    "ollama_generate",
+    "claude_review"
+)
+
 
 builder.add_conditional_edges(
     "claude_review",
     claude_decision,
     {
-        "agree": "return_ollama",
-        "disagree": "prepare_claude_correction",
-        "additions": "return_ollama_with_additions"
+        "agree":
+            "return_ollama",
+
+        "disagree":
+            "prepare_claude_correction",
+
+        "additions":
+            "return_ollama_with_additions"
     }
 )
 
-builder.add_edge("prepare_claude_correction", "ollama_review_claude")
+
+builder.add_edge(
+    "prepare_claude_correction",
+    "ollama_review_claude"
+)
+
 
 builder.add_conditional_edges(
     "ollama_review_claude",
     ollama_decision,
     {
-        "agree": "return_claude",
-        "disagree": "return_ollama"
+        "agree":
+            "return_claude",
+
+        "disagree":
+            "return_ollama"
     }
 )
 
-builder.add_edge("return_ollama", END)
-builder.add_edge("return_claude", END)
-builder.add_edge("return_ollama_with_additions", END)
+
+builder.add_edge(
+    "return_ollama",
+    END
+)
+
+builder.add_edge(
+    "return_claude",
+    END
+)
+
+builder.add_edge(
+    "return_ollama_with_additions",
+    END
+)
+
 
 app_graph = builder.compile()
 
 
 # ============================================================
-# FASTAPI APP
+# FASTAPI
 # ============================================================
 
-app = FastAPI(title="Dual-AI Review API")
+app = FastAPI(
+    title="Dual-AI Review API"
+)
 
 
 class AskRequest(BaseModel):
+
     message: str
 
 
 class AskResponse(BaseModel):
+
     final_response: str
+
     claude_decision: str
+
     ollama_decision: str
 
 
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
 @app.get("/")
 def health():
-    return {"status": "ok"}
+
+    return {
+        "status": "ok"
+    }
 
 
-@app.post("/ask", response_model=AskResponse)
+# ============================================================
+# ASK
+# ============================================================
+
+@app.post(
+    "/ask",
+    response_model=AskResponse
+)
 def ask(payload: AskRequest):
 
-    if not payload.message or not payload.message.strip():
-        raise HTTPException(status_code=400, detail="message must not be empty")
+    if (
+        not payload.message
+        or not payload.message.strip()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="message must not be empty"
+        )
 
-    print(f"\n[Request] {payload.message}")
+    print(
+        f"\n[Request] {payload.message}"
+    )
 
     try:
+
         result = app_graph.invoke({
-            "user_message": payload.message,
-            "ollama_response": "",
-            "claude_decision": "",
-            "claude_response": "",
-            "claude_additions": "",
-            "claude_reasoning": "",
-            "ollama_decision": "",
-            "ollama_reasoning": "",
-            "final_response": ""
+
+            "user_message":
+                payload.message,
+
+            "ollama_response":
+                "",
+
+            "claude_decision":
+                "",
+
+            "claude_response":
+                "",
+
+            "claude_additions":
+                "",
+
+            "claude_reasoning":
+                "",
+
+            "ollama_decision":
+                "",
+
+            "ollama_reasoning":
+                "",
+
+            "final_response":
+                ""
         })
+
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Pipeline error: {e}")
+
+        print(
+            f"[Pipeline Error] {repr(e)}"
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"Pipeline error: {e}"
+        )
 
     return AskResponse(
-        final_response=result["final_response"],
-        claude_decision=result.get("claude_decision", ""),
-        ollama_decision=result.get("ollama_decision", "")
+
+        final_response=
+            result["final_response"],
+
+        claude_decision=
+            result.get(
+                "claude_decision",
+                ""
+            ),
+
+        ollama_decision=
+            result.get(
+                "ollama_decision",
+                ""
+            )
     )
