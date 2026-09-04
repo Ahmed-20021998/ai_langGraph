@@ -624,8 +624,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[
+        "https://ai-lang-graph-jj5z-kw1iyeghs-ahmeds-projects-5024b40d.vercel.app/ask",
+    ],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
